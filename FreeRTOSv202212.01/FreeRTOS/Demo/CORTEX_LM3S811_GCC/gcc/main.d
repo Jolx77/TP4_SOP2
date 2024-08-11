@@ -1,4 +1,4 @@
-gcc/main.o: main.c hw_include/DriverLib.h hw_include/DriverLib.h \
+gcc/main.o: main.c header.h hw_include/DriverLib.h hw_include/DriverLib.h \
  hw_include/hw_adc.h hw_include/hw_comp.h hw_include/hw_flash.h \
  hw_include/hw_gpio.h hw_include/hw_i2c.h hw_include/hw_ints.h \
  hw_include/hw_memmap.h hw_include/hw_nvic.h hw_include/hw_pwm.h \

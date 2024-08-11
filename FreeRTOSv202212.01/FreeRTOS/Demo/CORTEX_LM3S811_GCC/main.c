@@ -3,55 +3,11 @@
  * Copyright (C) 2020 Amazon.com, Inc. or its affiliates.  All Rights Reserved.
  */
 
-/* Environment includes. */
-#include "DriverLib.h"
-
-/* Scheduler includes. */
-#include "FreeRTOS.h"
-#include "task.h"
-#include "queue.h"
-#include "semphr.h"
-#include "osram96x16.h"  
-
-
-/* Configuration for the hardware and tasks. */
-#define mainBAUD_RATE                ( 19200 )
-#define MAX_HEIGHT 16  // Altura máxima del gráfico en píxeles
-#define MAX_WIDTH 96   // Ancho máximo del gráfico en píxeles
-
-/* Task priorities. */
-#define mainCHECK_TASK_PRIORITY      ( tskIDLE_PRIORITY + 3 )
-#define mainGRAPH_TASK_PRIORITY      ( tskIDLE_PRIORITY + 1 )
-#define mainSENSOR_TASK_PRIORITY     ( tskIDLE_PRIORITY + 2 )
-#define mainTOP_TASK_PRIORITY        ( tskIDLE_PRIORITY + 2 )
-#define mainTOP_TASK_DELAY           ( pdMS_TO_TICKS(5000) ) // 5 segundos
-
-
-/* Hardware setup function. */
-static void prvSetupHardware( void );
-
-/* Task declarations. */
-static void vTemperatureSensorTask(void *pvParameters);
-static void vFilterTask(void *pvParameters);
-static void vGraphTask(void *pvParameters);
-static void vUARTTask(void *pvParameters);
-static void vTopTask(void *pvParameters);
-//void intToStr(int num, char* str, int len);
-void intToChar(unsigned char graph[2*MAX_WIDTH],int value);
-void UARTSend(const char *pucBuffer, unsigned long ulCount);
-void my_itoa(int num, char *str);
-size_t my_strlen(const char *str);
-void my_snprintf(char *buffer, size_t size, const char *format, const char *taskName, char state, unsigned int priority, unsigned int stack, unsigned int taskNumber);
-tBoolean UARTBusy(unsigned long ulBase);
-
-/* Queue handles. */
-QueueHandle_t xFilteredQueue;
-QueueHandle_t xTemperatureQueue;
-QueueHandle_t xNQueue;
+#include "header.h"
 
 /*-----------------------------------------------------------*/
 
-int main(void)
+int main(int argc, char *argv[])
 {
     /* Configure the clocks, UART, and GPIO. */
     prvSetupHardware();
@@ -60,14 +16,19 @@ int main(void)
     xTemperatureQueue = xQueueCreate(10, sizeof(int));
     xFilteredQueue = xQueueCreate(10, sizeof(int));
     xNQueue = xQueueCreate(1, sizeof(int));  // Queue for sending N
+    xSeedQueue = xQueueCreate(1, sizeof(unsigned int));  // Queue for sending the seed
+    unsigned int seed = 91218; // Initialize the seed with an arbitrary value
+    xQueueSend(xSeedQueue, &seed, portMAX_DELAY);
+
+    /* Define buffers for the static task. */
+    static StackType_t xTopTaskStack[configMINIMAL_STACK_SIZE * 2];
+    static StaticTask_t xTopTaskTCB;
 
     /* Start the tasks. */
-    xTaskCreate(vTemperatureSensorTask, "Temperature", configMINIMAL_STACK_SIZE, NULL, mainSENSOR_TASK_PRIORITY, NULL);
-    xTaskCreate(vFilterTask, "Filter", configMINIMAL_STACK_SIZE, NULL, mainSENSOR_TASK_PRIORITY, NULL);
-    xTaskCreate(vGraphTask, "Graph", configMINIMAL_STACK_SIZE, NULL, mainGRAPH_TASK_PRIORITY, NULL);
-    xTaskCreate(vUARTTask, "UART", configMINIMAL_STACK_SIZE, NULL, mainCHECK_TASK_PRIORITY, NULL);
-	xTaskCreate(vTopTask, "Top", configMINIMAL_STACK_SIZE, NULL, mainTOP_TASK_PRIORITY, NULL);
-
+    xTaskCreate(vTemperatureSensorTask, "Temps", (configMINIMAL_STACK_SIZE)-52, NULL, mainTEMP_TASK_PRIORITY, NULL);
+    xTaskCreate(vFilterTask, "Filter", (configMINIMAL_STACK_SIZE)-48, NULL, mainFILTER_TASK_PRIORITY, NULL);
+    xTaskCreate(vGraphTask, "Graph", (configMINIMAL_STACK_SIZE)-2, NULL, mainGRAPH_TASK_PRIORITY, NULL);
+    xTaskCreate(vTopTask, "Top", (configMINIMAL_STACK_SIZE*2)-58, NULL, mainTOP_TASK_PRIORITY, NULL);   
 
     /* Start the scheduler. */
     vTaskStartScheduler();
@@ -75,75 +36,74 @@ int main(void)
     /* If the scheduler starts, the following code should never be reached. */
     return 0;
 }
-/*-----------------------------------------------------------*/
 
 static void prvSetupHardware(void)
 {
     /* Setup the system clock. */
     SysCtlClockSet(SYSCTL_SYSDIV_10 | SYSCTL_USE_PLL | SYSCTL_OSC_MAIN | SYSCTL_XTAL_6MHZ);
 
-    /* Enable the UART for communication. */
- 	SysCtlPeripheralEnable(SYSCTL_PERIPH_UART0);
-    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
-    
+    configureTimerForRunTimeStats();
+
     /* Enable the UART for communication. */
     SysCtlPeripheralEnable(SYSCTL_PERIPH_UART0);
     SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
+    
+    /* Configure UART pins. */
     GPIODirModeSet(GPIO_PORTA_BASE, GPIO_PIN_0 | GPIO_PIN_1, GPIO_DIR_MODE_HW);
     UARTConfigSet(UART0_BASE, mainBAUD_RATE, UART_CONFIG_WLEN_8 | UART_CONFIG_PAR_NONE | UART_CONFIG_STOP_ONE);
+
+    /* Enable UART interrupts. */
+    UARTIntEnable(UART0_BASE, UART_INT_RX | UART_INT_RT);
+    IntEnable(INT_UART0);
+    UARTIntRegister(UART0_BASE, vUART_ISR);  // Register the ISR
 }
 
+
 /*-----------------------------------------------------------*/
-
-/* Pseudo-random number generator function for simulating the temperature sensor. */
-static unsigned int seed = 91218;
-
 tBoolean UARTBusy(unsigned long ulBase)
 {
-    // Verificar si el UART está ocupado
+    // Check if UART is busy
     return (HWREG(ulBase + UART_O_FR) & UART_FR_BUSY) ? true : false;
 }
 
-// Función para calcular la longitud de una cadena
 size_t my_strlen(const char *str) {
     size_t len = 0;
     while (*str++) len++;
     return len;
 }
 
-// Función para convertir un número a cadena
 void my_itoa(int num, char *str) {
     int i = 0;
     int isNegative = 0;
 
-    // Manejar el caso del número 0
+    // Handle the case for 0
     if (num == 0) {
         str[i++] = '0';
         str[i] = '\0';
         return;
     }
 
-    // Manejar números negativos
+    // Handle negative numbers
     if (num < 0) {
         isNegative = 1;
         num = -num;
     }
 
-    // Procesar cada dígito
+    // Process each digit
     while (num != 0) {
         int rem = num % 10;
         str[i++] = rem + '0';
         num = num / 10;
     }
 
-    // Si el número es negativo, agregar el signo
+    // Add sign for negative numbers
     if (isNegative) {
         str[i++] = '-';
     }
 
     str[i] = '\0';
 
-    // Invertir la cadena
+    // Reverse the string
     int start = 0;
     int end = i - 1;
     while (start < end) {
@@ -155,25 +115,60 @@ void my_itoa(int num, char *str) {
     }
 }
 
+void intToGraph(unsigned char graph[2*MAX_WIDTH],int value)
+{
+	for(int i = MAX_WIDTH - 1; i > 0;i--)
+	{
+		graph[i] = graph[i-1];
+		graph[i + MAX_WIDTH] = graph[i + MAX_WIDTH - 1];
+	}
+
+	graph[MAX_WIDTH] = 0;
+	graph[0] = 0;
+
+	if(value < 8)
+	{
+		graph[MAX_WIDTH] = (1 << (7 - value));
+	}
+	else
+	{
+		graph[0] = (1 << (15 - value));
+	}
+}
+
 void padString(char *dest, const char *src, int width)
 {
     int len = 0;
+    // Copy characters from the source string to the destination string
     while (*src && len < width)
     {
         *dest++ = *src++;
         len++;
     }
+    // Fill the remaining space with spaces until the specified width is reached
     while (len < width)
     {
         *dest++ = ' ';
         len++;
     }
+    // Null-terminate the destination string
     *dest = '\0';
 }
 
 unsigned int simple_rand(void)
 {
-    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    unsigned int seed;
+
+    // Receive the seed from the queue
+    if (xQueueReceive(xSeedQueue, &seed, portMAX_DELAY) == pdPASS)
+    {
+        // Generate the new seed value
+        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+
+        // Send the new seed back to the queue
+        xQueueSend(xSeedQueue, &seed, portMAX_DELAY);
+    }
+
     return seed;
 }
 
@@ -181,10 +176,10 @@ void UARTSend(const char *pucBuffer, unsigned long ulCount)
 {
     while (ulCount--)
     {
-        // Esperar hasta que el UART esté listo para enviar
+        // Wait until the UART is ready to transmit
         while (UARTBusy(UART0_BASE));
         
-        // Enviar el carácter
+        // Send the character
         UARTCharPut(UART0_BASE, *pucBuffer++);
     }
 }
@@ -193,10 +188,10 @@ void UARTSendString(const char *str)
 {
     while (*str)
     {
-        // Esperar hasta que el UART esté listo para enviar
+        // Wait until the UART is ready to transmit
         while (UARTBusy(UART0_BASE));
         
-        // Enviar el carácter
+        // Send the character
         UARTCharPut(UART0_BASE, *str++);
     }
 }
@@ -219,80 +214,116 @@ static void vTopTask(void *pvParameters)
     char buffer[128];
     char temp[32];
     UBaseType_t uxArraySize, x;
-    TaskStatus_t *pxTaskStatusArray;
-    uint32_t ulTotalRunTime, ulStatsAsPercentage;
+    TaskStatus_t pxTaskStatusArray[configMAX_PRIORITIES]; // Asignar tamaño máximo posible
+    uint32_t ulTotalRunTime;
+    size_t xFreeHeapSize;
+
+    #if WATERMARK_MIN == 1
+    TaskHistory_t xTaskHistoryArray[configMAX_PRIORITIES];
+    #endif
+
+    // Obtener el número máximo de tareas una vez
+    uxArraySize = uxTaskGetNumberOfTasks();
 
     for (;;)
     {
-        // Obtener el número de tareas
-        uxArraySize = uxTaskGetNumberOfTasks();
+        // Initialize the task history array if WATERMARK_MIN is defined as 1
+        #if WATERMARK_MIN == 1
+        for (x = 0; x < configMAX_PRIORITIES; x++) {
+            xTaskHistoryArray[x].xTaskHandle = NULL;
+            xTaskHistoryArray[x].usLowestStack = 0xFFFF; // Initial high value
+        }
+        #endif
 
-        // Asignar memoria para el array de TaskStatus_t
-        pxTaskStatusArray = pvPortMalloc(uxArraySize * sizeof(TaskStatus_t));
+        // Get the state of all tasks
+        uxArraySize = uxTaskGetSystemState(pxTaskStatusArray, uxArraySize, &ulTotalRunTime);
 
-        if (pxTaskStatusArray != NULL)
+        // Send header via UART depending on the value of WATERMARK_MIN
+        #if WATERMARK_MIN == 1
+        UARTSendString("Task Name      State        Priority   Stack(Words)  Stack-Min(words)  Task Number      TimeOfCpu(ms)\r\n");
+        #else
+        UARTSendString("Task Name      State        Priority   Stack(Words)  Task Number  TimeOfCpu(ms)\r\n");
+        #endif
+
+        // Iterate through all tasks and send their statistics via UART
+        for (x = 0; x < uxArraySize; x++)
         {
-            // Obtener el estado de todas las tareas
-            uxArraySize = uxTaskGetSystemState(pxTaskStatusArray, uxArraySize, &ulTotalRunTime);
+            // Format the task name
+            padString(buffer, pxTaskStatusArray[x].pcTaskName, 15);
 
-            // Enviar encabezado por UART
-            UARTSendString("Task Name      State        Priority   Stack    Task Number  CPU Usage\r\n");
+            // Format the task state
+            padString(buffer + 15, getTaskStateString(pxTaskStatusArray[x].eCurrentState), 13);
 
-            // Recorrer todas las tareas y enviar sus estadísticas por UART
-            for (x = 0; x < uxArraySize; x++)
-            {
-                // Formatear el nombre de la tarea
-                padString(buffer, pxTaskStatusArray[x].pcTaskName, 15);
+            // Format the task priority
+            my_itoa(pxTaskStatusArray[x].uxCurrentPriority, temp);
+            padString(buffer + 28, temp, 12);
 
-                // Formatear el estado de la tarea
-                padString(buffer + 15, getTaskStateString(pxTaskStatusArray[x].eCurrentState), 13);
+            // Format the task stack
+            my_itoa(pxTaskStatusArray[x].usStackHighWaterMark, temp);
+            padString(buffer + 40, temp, 14);
 
-                // Formatear la prioridad de la tarea
-                my_itoa(pxTaskStatusArray[x].uxCurrentPriority, temp);
-                padString(buffer + 28, temp, 10);
-
-                // Formatear el stack de la tarea
-                my_itoa(pxTaskStatusArray[x].usStackHighWaterMark, temp);
-                padString(buffer + 38, temp, 10);
-
-                // Formatear el número de la tarea
-                my_itoa(pxTaskStatusArray[x].xTaskNumber, temp);
-                padString(buffer + 48, temp, 12);
-
-                // Calcular y formatear el uso de CPU de la tarea
-                if (ulTotalRunTime > 0)
-                {
-                    ulStatsAsPercentage = (pxTaskStatusArray[x].ulRunTimeCounter * 100) / ulTotalRunTime;
+            // Update and format the lowest historical stack value if WATERMARK_MIN is defined as 1
+            #if WATERMARK_MIN == 1
+            for (int i = 0; i < configMAX_PRIORITIES; i++) {
+                if (xTaskHistoryArray[i].xTaskHandle == pxTaskStatusArray[x].xHandle || xTaskHistoryArray[i].xTaskHandle == NULL) {
+                    if (xTaskHistoryArray[i].xTaskHandle == NULL) {
+                        xTaskHistoryArray[i].xTaskHandle = pxTaskStatusArray[x].xHandle;
+                    }
+                    if (pxTaskStatusArray[x].usStackHighWaterMark < xTaskHistoryArray[i].usLowestStack) {
+                        xTaskHistoryArray[i].usLowestStack = pxTaskStatusArray[x].usStackHighWaterMark;
+                    }
+                    my_itoa(xTaskHistoryArray[i].usLowestStack, temp);
+                    padString(buffer + 54, temp, 14);
+                    break;
                 }
-                else
-                {
-                    ulStatsAsPercentage = 0;
-                }
-                my_itoa(ulStatsAsPercentage, temp);
-                int len = my_strlen(temp);
-                temp[len] = '%';
-                temp[len + 1] = '\0';
-                padString(buffer + 60, temp, 10);
-
-                // Terminar la cadena con "\r\n"
-                buffer[70] = '\r';
-                buffer[71] = '\n';
-                buffer[72] = '\0';
-
-                // Enviar la línea formateada por UART
-                UARTSendString(buffer);
             }
+            #endif
 
-            // Liberar la memoria asignada
-            vPortFree(pxTaskStatusArray);
+            // Format the task number
+            #if WATERMARK_MIN == 1
+            my_itoa(pxTaskStatusArray[x].xTaskNumber, temp);
+            padString(buffer + 68, temp, 16);
+            #else
+            my_itoa(pxTaskStatusArray[x].xTaskNumber, temp);
+            padString(buffer + 54, temp, 12);
+            #endif
+
+            // Format the task CPU time
+            #if WATERMARK_MIN == 1
+            my_itoa(pxTaskStatusArray[x].ulRunTimeCounter, temp);
+            padString(buffer + 84, temp, 17);
+            #else
+            my_itoa(pxTaskStatusArray[x].ulRunTimeCounter, temp);
+            padString(buffer + 66, temp, 15);
+            #endif
+
+            // End the string with "\r\n"
+            buffer[101] = '\r';
+            buffer[102] = '\n';
+            buffer[103] = '\0';
+
+            // Send the formatted line via UART
+            UARTSendString(buffer);
         }
 
-        // Esperar antes de la siguiente actualización
+        // Send the total run time
+        UARTSendString("Total Run Time: ");
+        my_itoa(ulTotalRunTime, temp);
+        UARTSendString(temp);
+        UARTSendString(" ms\r\n");
+
+        // Get and send the free heap size
+        xFreeHeapSize = xPortGetFreeHeapSize();
+        UARTSendString("Free heap: ");
+        my_itoa(xFreeHeapSize, temp);
+        UARTSendString(temp);
+        UARTSendString(" bytes\r\n");
+
+        // Wait before the next update
         vTaskDelay(mainTOP_TASK_DELAY);
     }
 }
 
-/* Temperature sensor task to generate random temperature values. */
 static void vTemperatureSensorTask(void *pvParameters)
 {
     const TickType_t xFrequency = pdMS_TO_TICKS(100); // 10Hz frequency
@@ -306,40 +337,45 @@ static void vTemperatureSensorTask(void *pvParameters)
     }
 }
 
-static void vUARTTask(void *pvParameters)
+void vUART_ISR(void)
 {
+    uint32_t ulStatus;
     char c;
     int newN;
 
-    for (;;)
-    {
-        /* Wait for a character from UART. */
-        if (UARTCharsAvail(UART0_BASE))
-        {
-            c = UARTCharGet(UART0_BASE);
-            
-            /* Check if the character is a valid number between '1' and '9'. */
-            if (c >= '1' && c <= '9')
-            {
-                newN = c - '0'; // Convert ASCII to integer
-                
-                /* Send the new value of N to the filter task via the queue */
-                xQueueSend(xNQueue, &newN, portMAX_DELAY);
+    /* Get the interrupt status. */
+    ulStatus = UARTIntStatus(UART0_BASE, true);
 
-                /* Optional: Echo the received character back to UART */
-                UARTCharPut(UART0_BASE, c);
-            }
-            else
-            {
-                /* Optional: Echo an error message or ignore the character */
-                UARTCharPut(UART0_BASE, 'E'); // Echo 'E' for error
-            }
+    /* Clear the asserted interrupts. */
+    UARTIntClear(UART0_BASE, ulStatus);
+
+    /* Check if it's a receive interrupt. */
+    if (ulStatus & (UART_INT_RX | UART_INT_RT))
+    {
+        /* Get the character from UART. */
+        c = UARTCharGet(UART0_BASE);
+
+        /* Check if the character is a valid number between '1' and '9'. */
+        if (c >= '1' && c <= '9')
+        {
+            newN = c - '0'; // Convert ASCII to integer
+
+            /* Send the new value of N to the filter task via the queue. */
+            xQueueSendFromISR(xNQueue, &newN, NULL);
+
+            /* Optional: Echo the received character back to UART. */
+            UARTCharPut(UART0_BASE, c);
+
+            /* Exit the ISR to free the UART. */
+            return;
         }
-        vTaskDelay(pdMS_TO_TICKS(100)); // Small delay to avoid busy-waiting
+        else
+        {
+            /* Optional: Echo an error message or ignore the character. */
+            UARTCharPut(UART0_BASE, 'E'); // Echo 'E' for error
+        }
     }
 }
-
-/* Filtering task to apply a low-pass filter on the temperature values. */
 static void vFilterTask(void *pvParameters)
 {
     int N = 3; // Initial value of N
@@ -378,96 +414,63 @@ static void vFilterTask(void *pvParameters)
     }
 }
 
-//
-//// Función para convertir un entero a una cadena
-//void intToStr(int num, char* str, int len) {
-//    int i = len - 1;
-//    str[i--] = '\0';
-//    if (num == 0) {
-//        str[i] = '0';
-//        return;
-//    }
-//    while (num != 0 && i >= 0) {
-//        str[i--] = (num % 10) + '0';
-//        num /= 10;
-//    }
-//    while (i >= 0) {
-//        str[i--] = ' ';
-//    }
-//}
-
-void intToChar(unsigned char graph[2*MAX_WIDTH],int value)
-{
-	for(int i = MAX_WIDTH - 1; i > 0;i--)
-	{
-		graph[i] = graph[i-1];
-		graph[i + MAX_WIDTH] = graph[i + MAX_WIDTH - 1];
-	}
-
-	graph[MAX_WIDTH] = 0;
-	graph[0] = 0;
-
-	if(value < 8)
-	{
-		graph[MAX_WIDTH] = (1 << (7 - value));
-	}
-	else
-	{
-		graph[0] = (1 << (15 - value));
-	}
-}
-
 static void vGraphTask(void *pvParameters)
 {
     int filteredValue;
-    unsigned char graph[2 * MAX_WIDTH] = {0}; // Buffer para almacenar el gráfico en las dos líneas de la pantalla
+    unsigned char graph[2 * MAX_WIDTH] = {0}; // Buffer to store the graph on the two lines of the screen
 
-    // Inicializar la pantalla LCD
+    // Initialize the LCD screen
     OSRAMInit(false);
     OSRAMClear();
 
     for (;;)
     {
-        /* Esperar a que llegue un valor filtrado. */
+        /* Wait for a filtered value to arrive. */
         xQueueReceive(xFilteredQueue, &filteredValue, portMAX_DELAY);
     
-        /* Escalar el valor filtrado a la altura del gráfico. */
+        /* Scale the filtered value to the height of the graph. */
         int scaledValue = (filteredValue * (MAX_HEIGHT)) / 99;
-        /* Escribir el valor filtrado en la pantalla LCD. */
+        /* Write the filtered value to the LCD screen. */
         
-        /* Llamar a la función intToChar para actualizar el buffer del gráfico. */
-        intToChar(graph, scaledValue);
-        // Limpiar la pantalla LCD antes de dibujar el gráfico
+        /* Call the intToGraph function to update the graph buffer. */
+        intToGraph(graph, scaledValue);
+        // Clear the LCD screen before drawing the graph
         OSRAMClear();
-        /* Dibujar el gráfico en la pantalla LCD. */
+        /* Draw the graph on the LCD screen. */
         OSRAMImageDraw(graph, 0, 0, MAX_WIDTH, 2);
     }
 }
 
+void configureTimerForRunTimeStats(void)
+{
+    // Enable the timer peripheral
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER0);
+    TimerConfigure(TIMER0_BASE, TIMER_CFG_32_BIT_TIMER);
 
-//static void vGraphTask(void *pvParameters)
-//{
-//    int filteredValue;
-//    unsigned portBASE_TYPE uxLine = 0, uxRow = 0;
-//
-//    // Inicializar la pantalla LCD
-//    OSRAMInit(false);
-//    OSRAMClear();
-//
-//    for(;;)
-//    {
-//        /* Esperar a que llegue un valor filtrado. */
-//        xQueueReceive(xFilteredQueue, &filteredValue, portMAX_DELAY);
-//
-//        /* Convertir el valor filtrado a una cadena. */
-//        char strValue[10];
-//        intToStr(filteredValue, strValue, sizeof(strValue));
-//
-//        /* Escribir el valor filtrado en la pantalla LCD. */
-//        OSRAMClear();
-//        OSRAMStringDraw(strValue, uxLine & 0x3f, uxRow & 0x01);
-//    }
-//}
-//
-//
-//
+    // Configure the timer to generate interrupts every 1 ms
+    uint32_t ui32Period = (SysCtlClockGet()/1000);
+    TimerLoadSet(TIMER0_BASE, TIMER_A, ui32Period - 1);
+
+    // Register the interrupt handler
+    TimerIntRegister(TIMER0_BASE, TIMER_A, Timer0IntHandler);
+    IntEnable(INT_TIMER0A);
+    TimerIntEnable(TIMER0_BASE, TIMER_TIMA_TIMEOUT);
+
+    // Enable the timer
+    TimerEnable(TIMER0_BASE, TIMER_A);
+}
+
+void Timer0IntHandler(void)
+{
+    // Clear the timer interrupt
+    TimerIntClear(TIMER0_BASE, TIMER_TIMA_TIMEOUT);
+
+    // Increment the runtime counter
+    ulHighFrequencyTimerTicks++;
+}
+
+uint32_t getRunTimeCounterValue(void)
+{
+    // Return the current runtime counter value
+    return ulHighFrequencyTimerTicks;
+}
