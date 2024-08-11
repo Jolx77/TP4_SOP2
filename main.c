@@ -1,359 +1,476 @@
 /*
  * FreeRTOS V202212.01
  * Copyright (C) 2020 Amazon.com, Inc. or its affiliates.  All Rights Reserved.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- *
- * https://www.FreeRTOS.org
- * https://github.com/FreeRTOS
- *
  */
 
-
-/*
- * This project contains an application demonstrating the use of the
- * FreeRTOS.org mini real time scheduler on the Luminary Micro LM3S811 Eval
- * board.  See http://www.FreeRTOS.org for more information.
- *
- * main() simply sets up the hardware, creates all the demo application tasks,
- * then starts the scheduler.  http://www.freertos.org/a00102.html provides
- * more information on the standard demo tasks.
- *
- * In addition to a subset of the standard demo application tasks, main.c also
- * defines the following tasks:
- *
- * + A 'Print' task.  The print task is the only task permitted to access the
- * LCD - thus ensuring mutual exclusion and consistent access to the resource.
- * Other tasks do not access the LCD directly, but instead send the text they
- * wish to display to the print task.  The print task spends most of its time
- * blocked - only waking when a message is queued for display.
- *
- * + A 'Button handler' task.  The eval board contains a user push button that
- * is configured to generate interrupts.  The interrupt handler uses a
- * semaphore to wake the button handler task - demonstrating how the priority
- * mechanism can be used to defer interrupt processing to the task level.  The
- * button handler task sends a message both to the LCD (via the print task) and
- * the UART where it can be viewed using a dumb terminal (via the UART to USB
- * converter on the eval board).  NOTES:  The dumb terminal must be closed in
- * order to reflash the microcontroller.  A very basic interrupt driven UART
- * driver is used that does not use the FIFO.  19200 baud is used.
- *
- * + A 'check' task.  The check task only executes every five seconds but has a
- * high priority so is guaranteed to get processor time.  Its function is to
- * check that all the other tasks are still operational and that no errors have
- * been detected at any time.  If no errors have every been detected 'PASS' is
- * written to the display (via the print task) - if an error has ever been
- * detected the message is changed to 'FAIL'.  The position of the message is
- * changed for each write.
- */
-
-
-
-/* Environment includes. */
-#include "DriverLib.h"
-
-/* Scheduler includes. */
-#include "FreeRTOS.h"
-#include "task.h"
-#include "queue.h"
-#include "semphr.h"
-
-/* Demo app includes. */
-#include "integer.h"
-#include "PollQ.h"
-#include "semtest.h"
-#include "BlockQ.h"
-
-/* Delay between cycles of the 'check' task. */
-#define mainCHECK_DELAY						( ( TickType_t ) 5000 / portTICK_PERIOD_MS )
-
-/* UART configuration - note this does not use the FIFO so is not very
-efficient. */
-#define mainBAUD_RATE				( 19200 )
-#define mainFIFO_SET				( 0x10 )
-
-/* Demo task priorities. */
-#define mainQUEUE_POLL_PRIORITY		( tskIDLE_PRIORITY + 2 )
-#define mainCHECK_TASK_PRIORITY		( tskIDLE_PRIORITY + 3 )
-#define mainSEM_TEST_PRIORITY		( tskIDLE_PRIORITY + 1 )
-#define mainBLOCK_Q_PRIORITY		( tskIDLE_PRIORITY + 2 )
-
-/* Demo board specifics. */
-#define mainPUSH_BUTTON             GPIO_PIN_4
-
-/* Misc. */
-#define mainQUEUE_SIZE				( 3 )
-#define mainDEBOUNCE_DELAY			( ( TickType_t ) 150 / portTICK_PERIOD_MS )
-#define mainNO_DELAY				( ( TickType_t ) 0 )
-/*
- * Configure the processor and peripherals for this demo.
- */
-static void prvSetupHardware( void );
-
-/*
- * The 'check' task, as described at the top of this file.
- */
-static void vCheckTask( void *pvParameters );
-
-/*
- * The task that is woken by the ISR that processes GPIO interrupts originating
- * from the push button.
- */
-static void vButtonHandlerTask( void *pvParameters );
-
-/*
- * The task that controls access to the LCD.
- */
-static void vPrintTask( void *pvParameter );
-
-/* String that is transmitted on the UART. */
-static char *cMessage = "Task woken by button interrupt! --- ";
-static volatile char *pcNextChar;
-
-/* The semaphore used to wake the button handler task from within the GPIO
-interrupt handler. */
-SemaphoreHandle_t xButtonSemaphore;
-
-/* The queue used to send strings to the print task for display on the LCD. */
-QueueHandle_t xPrintQueue;
+#include "header.h"
 
 /*-----------------------------------------------------------*/
 
-int main( void )
+int main(int argc, char *argv[])
 {
-	/* Configure the clocks, UART and GPIO. */
-	prvSetupHardware();
+    /* Configure the clocks, UART, and GPIO. */
+    prvSetupHardware();
 
-	/* Create the semaphore used to wake the button handler task from the GPIO
-	ISR. */
-	vSemaphoreCreateBinary( xButtonSemaphore );
-	xSemaphoreTake( xButtonSemaphore, 0 );
+    /* Create the queues. */
+    xTemperatureQueue = xQueueCreate(10, sizeof(int));
+    xFilteredQueue = xQueueCreate(10, sizeof(int));
+    xNQueue = xQueueCreate(1, sizeof(int));  // Queue for sending N
+    xSeedQueue = xQueueCreate(1, sizeof(unsigned int));  // Queue for sending the seed
+    unsigned int seed = 91218; // Initialize the seed with an arbitrary value
+    xQueueSend(xSeedQueue, &seed, portMAX_DELAY);
 
-	/* Create the queue used to pass message to vPrintTask. */
-	xPrintQueue = xQueueCreate( mainQUEUE_SIZE, sizeof( char * ) );
+    /* Define buffers for the static task. */
+    static StackType_t xTopTaskStack[configMINIMAL_STACK_SIZE * 2];
+    static StaticTask_t xTopTaskTCB;
 
-	/* Start the standard demo tasks. */
-	vStartIntegerMathTasks( tskIDLE_PRIORITY );
-	vStartPolledQueueTasks( mainQUEUE_POLL_PRIORITY );
-	vStartSemaphoreTasks( mainSEM_TEST_PRIORITY );
-	vStartBlockingQueueTasks( mainBLOCK_Q_PRIORITY );
+    /* Start the tasks. */
+    xTaskCreate(vTemperatureSensorTask, "Temps", (configMINIMAL_STACK_SIZE)-52, NULL, mainTEMP_TASK_PRIORITY, NULL);
+    xTaskCreate(vFilterTask, "Filter", (configMINIMAL_STACK_SIZE)-48, NULL, mainFILTER_TASK_PRIORITY, NULL);
+    xTaskCreate(vGraphTask, "Graph", (configMINIMAL_STACK_SIZE)-2, NULL, mainGRAPH_TASK_PRIORITY, NULL);
+    xTaskCreate(vTopTask, "Top", (configMINIMAL_STACK_SIZE*2)-58, NULL, mainTOP_TASK_PRIORITY, NULL);   
 
-	/* Start the tasks defined within the file. */
-	xTaskCreate( vCheckTask, "Check", configMINIMAL_STACK_SIZE, NULL, mainCHECK_TASK_PRIORITY, NULL );
-	xTaskCreate( vButtonHandlerTask, "Status", configMINIMAL_STACK_SIZE, NULL, mainCHECK_TASK_PRIORITY + 1, NULL );
-	xTaskCreate( vPrintTask, "Print", configMINIMAL_STACK_SIZE, NULL, mainCHECK_TASK_PRIORITY - 1, NULL );
+    /* Start the scheduler. */
+    vTaskStartScheduler();
 
-	/* Start the scheduler. */
-	vTaskStartScheduler();
-
-	/* Will only get here if there was insufficient heap to start the
-	scheduler. */
-
-	return 0;
+    /* If the scheduler starts, the following code should never be reached. */
+    return 0;
 }
-/*-----------------------------------------------------------*/
 
-static void vCheckTask( void *pvParameters )
+static void prvSetupHardware(void)
 {
-portBASE_TYPE xErrorOccurred = pdFALSE;
-TickType_t xLastExecutionTime;
-const char *pcPassMessage = "PASS";
-const char *pcFailMessage = "FAIL";
+    /* Setup the system clock. */
+    SysCtlClockSet(SYSCTL_SYSDIV_10 | SYSCTL_USE_PLL | SYSCTL_OSC_MAIN | SYSCTL_XTAL_6MHZ);
 
-	/* Initialise xLastExecutionTime so the first call to vTaskDelayUntil()
-	works correctly. */
-	xLastExecutionTime = xTaskGetTickCount();
+    configureTimerForRunTimeStats();
 
-	for( ;; )
+    /* Enable the UART for communication. */
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_UART0);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
+    
+    /* Configure UART pins. */
+    GPIODirModeSet(GPIO_PORTA_BASE, GPIO_PIN_0 | GPIO_PIN_1, GPIO_DIR_MODE_HW);
+    UARTConfigSet(UART0_BASE, mainBAUD_RATE, UART_CONFIG_WLEN_8 | UART_CONFIG_PAR_NONE | UART_CONFIG_STOP_ONE);
+
+    /* Enable UART interrupts. */
+    UARTIntEnable(UART0_BASE, UART_INT_RX | UART_INT_RT);
+    IntEnable(INT_UART0);
+    UARTIntRegister(UART0_BASE, vUART_ISR);  // Register the ISR
+}
+
+
+/*-----------------------------------------------------------*/
+tBoolean UARTBusy(unsigned long ulBase)
+{
+    // Check if UART is busy
+    return (HWREG(ulBase + UART_O_FR) & UART_FR_BUSY) ? true : false;
+}
+
+size_t my_strlen(const char *str) {
+    size_t len = 0;
+    while (*str++) len++;
+    return len;
+}
+
+void my_itoa(int num, char *str) {
+    int i = 0;
+    int isNegative = 0;
+
+    // Handle the case for 0
+    if (num == 0) {
+        str[i++] = '0';
+        str[i] = '\0';
+        return;
+    }
+
+    // Handle negative numbers
+    if (num < 0) {
+        isNegative = 1;
+        num = -num;
+    }
+
+    // Process each digit
+    while (num != 0) {
+        int rem = num % 10;
+        str[i++] = rem + '0';
+        num = num / 10;
+    }
+
+    // Add sign for negative numbers
+    if (isNegative) {
+        str[i++] = '-';
+    }
+
+    str[i] = '\0';
+
+    // Reverse the string
+    int start = 0;
+    int end = i - 1;
+    while (start < end) {
+        char temp = str[start];
+        str[start] = str[end];
+        str[end] = temp;
+        start++;
+        end--;
+    }
+}
+
+void intToGraph(unsigned char graph[2*MAX_WIDTH],int value)
+{
+	for(int i = MAX_WIDTH - 1; i > 0;i--)
 	{
-		/* Perform this check every mainCHECK_DELAY milliseconds. */
-		vTaskDelayUntil( &xLastExecutionTime, mainCHECK_DELAY );
-
-		/* Has an error been found in any task? */
-
-		if( xAreIntegerMathsTaskStillRunning() != pdTRUE )
-		{
-			xErrorOccurred = pdTRUE;
-		}
-
-		if( xArePollingQueuesStillRunning() != pdTRUE )
-		{
-			xErrorOccurred = pdTRUE;
-		}
-
-		if( xAreSemaphoreTasksStillRunning() != pdTRUE )
-		{
-			xErrorOccurred = pdTRUE;
-		}
-
-		if( xAreBlockingQueuesStillRunning() != pdTRUE )
-		{
-			xErrorOccurred = pdTRUE;
-		}
-
-		/* Send either a pass or fail message.  If an error is found it is
-		never cleared again.  We do not write directly to the LCD, but instead
-		queue a message for display by the print task. */
-		if( xErrorOccurred == pdTRUE )
-		{
-			xQueueSend( xPrintQueue, &pcFailMessage, portMAX_DELAY );
-		}
-		else
-		{
-			xQueueSend( xPrintQueue, &pcPassMessage, portMAX_DELAY );
-		}
+		graph[i] = graph[i-1];
+		graph[i + MAX_WIDTH] = graph[i + MAX_WIDTH - 1];
 	}
-}
-/*-----------------------------------------------------------*/
 
-static void prvSetupHardware( void )
-{
-	/* Setup the PLL. */
-	SysCtlClockSet( SYSCTL_SYSDIV_10 | SYSCTL_USE_PLL | SYSCTL_OSC_MAIN | SYSCTL_XTAL_6MHZ );
+	graph[MAX_WIDTH] = 0;
+	graph[0] = 0;
 
-	/* Setup the push button. */
-	SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOC);
-    GPIODirModeSet(GPIO_PORTC_BASE, mainPUSH_BUTTON, GPIO_DIR_MODE_IN);
-	GPIOIntTypeSet( GPIO_PORTC_BASE, mainPUSH_BUTTON,GPIO_FALLING_EDGE );
-	IntPrioritySet( INT_GPIOC, configKERNEL_INTERRUPT_PRIORITY );
-	GPIOPinIntEnable( GPIO_PORTC_BASE, mainPUSH_BUTTON );
-	IntEnable( INT_GPIOC );
-
-
-
-	/* Enable the UART.  */
-	SysCtlPeripheralEnable(SYSCTL_PERIPH_UART0);
-	SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
-
-	/* Set GPIO A0 and A1 as peripheral function.  They are used to output the
-	UART signals. */
-	GPIODirModeSet( GPIO_PORTA_BASE, GPIO_PIN_0 | GPIO_PIN_1, GPIO_DIR_MODE_HW );
-
-	/* Configure the UART for 8-N-1 operation. */
-	UARTConfigSet( UART0_BASE, mainBAUD_RATE, UART_CONFIG_WLEN_8 | UART_CONFIG_PAR_NONE | UART_CONFIG_STOP_ONE );
-
-	/* We don't want to use the fifo.  This is for test purposes to generate
-	as many interrupts as possible. */
-	HWREG( UART0_BASE + UART_O_LCR_H ) &= ~mainFIFO_SET;
-
-	/* Enable Tx interrupts. */
-	HWREG( UART0_BASE + UART_O_IM ) |= UART_INT_TX;
-	IntPrioritySet( INT_UART0, configKERNEL_INTERRUPT_PRIORITY );
-	IntEnable( INT_UART0 );
-
-
-	/* Initialise the LCD> */
-    OSRAMInit( false );
-    OSRAMStringDraw("www.FreeRTOS.org", 0, 0);
-	OSRAMStringDraw("LM3S811 demo", 16, 1);
-}
-/*-----------------------------------------------------------*/
-
-static void vButtonHandlerTask( void *pvParameters )
-{
-const char *pcInterruptMessage = "Int";
-
-	for( ;; )
+	if(value < 8)
 	{
-		/* Wait for a GPIO interrupt to wake this task. */
-		while( xSemaphoreTake( xButtonSemaphore, portMAX_DELAY ) != pdPASS );
-
-		/* Start the Tx of the message on the UART. */
-		UARTIntDisable( UART0_BASE, UART_INT_TX );
-		{
-			pcNextChar = cMessage;
-
-			/* Send the first character. */
-			if( !( HWREG( UART0_BASE + UART_O_FR ) & UART_FR_TXFF ) )
-			{
-				HWREG( UART0_BASE + UART_O_DR ) = *pcNextChar;
-			}
-
-			pcNextChar++;
-		}
-		UARTIntEnable(UART0_BASE, UART_INT_TX);
-
-		/* Queue a message for the print task to display on the LCD. */
-		xQueueSend( xPrintQueue, &pcInterruptMessage, portMAX_DELAY );
-
-		/* Make sure we don't process bounces. */
-		vTaskDelay( mainDEBOUNCE_DELAY );
-		xSemaphoreTake( xButtonSemaphore, mainNO_DELAY );
+		graph[MAX_WIDTH] = (1 << (7 - value));
+	}
+	else
+	{
+		graph[0] = (1 << (15 - value));
 	}
 }
 
-/*-----------------------------------------------------------*/
+void padString(char *dest, const char *src, int width)
+{
+    int len = 0;
+    // Copy characters from the source string to the destination string
+    while (*src && len < width)
+    {
+        *dest++ = *src++;
+        len++;
+    }
+    // Fill the remaining space with spaces until the specified width is reached
+    while (len < width)
+    {
+        *dest++ = ' ';
+        len++;
+    }
+    // Null-terminate the destination string
+    *dest = '\0';
+}
+
+unsigned int simple_rand(void)
+{
+    unsigned int seed;
+
+    // Receive the seed from the queue
+    if (xQueueReceive(xSeedQueue, &seed, portMAX_DELAY) == pdPASS)
+    {
+        // Generate the new seed value
+        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+
+        // Send the new seed back to the queue
+        xQueueSend(xSeedQueue, &seed, portMAX_DELAY);
+    }
+
+    return seed;
+}
+
+void UARTSend(const char *pucBuffer, unsigned long ulCount)
+{
+    while (ulCount--)
+    {
+        // Wait until the UART is ready to transmit
+        while (UARTBusy(UART0_BASE));
+        
+        // Send the character
+        UARTCharPut(UART0_BASE, *pucBuffer++);
+    }
+}
+
+void UARTSendString(const char *str)
+{
+    while (*str)
+    {
+        // Wait until the UART is ready to transmit
+        while (UARTBusy(UART0_BASE));
+        
+        // Send the character
+        UARTCharPut(UART0_BASE, *str++);
+    }
+}
+
+const char* getTaskStateString(eTaskState state)
+{
+    switch (state)
+    {
+        case eRunning:   return "Running";
+        case eReady:     return "Ready";
+        case eBlocked:   return "Blocked";
+        case eSuspended: return "Suspended";
+        case eDeleted:   return "Deleted";
+        default:         return "Unknown";
+    }
+}
+
+static void vTopTask(void *pvParameters)
+{
+    char buffer[128];
+    char temp[32];
+    UBaseType_t uxArraySize, x;
+    TaskStatus_t pxTaskStatusArray[configMAX_PRIORITIES]; // Asignar tamaño máximo posible
+    uint32_t ulTotalRunTime;
+    size_t xFreeHeapSize;
+
+    #if WATERMARK_MIN == 1
+    TaskHistory_t xTaskHistoryArray[configMAX_PRIORITIES];
+    #endif
+
+    // Obtener el número máximo de tareas una vez
+    uxArraySize = uxTaskGetNumberOfTasks();
+
+    for (;;)
+    {
+        // Initialize the task history array if WATERMARK_MIN is defined as 1
+        #if WATERMARK_MIN == 1
+        for (x = 0; x < configMAX_PRIORITIES; x++) {
+            xTaskHistoryArray[x].xTaskHandle = NULL;
+            xTaskHistoryArray[x].usLowestStack = 0xFFFF; // Initial high value
+        }
+        #endif
+
+        // Get the state of all tasks
+        uxArraySize = uxTaskGetSystemState(pxTaskStatusArray, uxArraySize, &ulTotalRunTime);
+
+        // Send header via UART depending on the value of WATERMARK_MIN
+        #if WATERMARK_MIN == 1
+        UARTSendString("Task Name      State        Priority   Stack(Words)  Stack-Min(words)  Task Number      TimeOfCpu(ms)\r\n");
+        #else
+        UARTSendString("Task Name      State        Priority   Stack(Words)  Task Number  TimeOfCpu(ms)\r\n");
+        #endif
+
+        // Iterate through all tasks and send their statistics via UART
+        for (x = 0; x < uxArraySize; x++)
+        {
+            // Format the task name
+            padString(buffer, pxTaskStatusArray[x].pcTaskName, 15);
+
+            // Format the task state
+            padString(buffer + 15, getTaskStateString(pxTaskStatusArray[x].eCurrentState), 13);
+
+            // Format the task priority
+            my_itoa(pxTaskStatusArray[x].uxCurrentPriority, temp);
+            padString(buffer + 28, temp, 12);
+
+            // Format the task stack
+            my_itoa(pxTaskStatusArray[x].usStackHighWaterMark, temp);
+            padString(buffer + 40, temp, 14);
+
+            // Update and format the lowest historical stack value if WATERMARK_MIN is defined as 1
+            #if WATERMARK_MIN == 1
+            for (int i = 0; i < configMAX_PRIORITIES; i++) {
+                if (xTaskHistoryArray[i].xTaskHandle == pxTaskStatusArray[x].xHandle || xTaskHistoryArray[i].xTaskHandle == NULL) {
+                    if (xTaskHistoryArray[i].xTaskHandle == NULL) {
+                        xTaskHistoryArray[i].xTaskHandle = pxTaskStatusArray[x].xHandle;
+                    }
+                    if (pxTaskStatusArray[x].usStackHighWaterMark < xTaskHistoryArray[i].usLowestStack) {
+                        xTaskHistoryArray[i].usLowestStack = pxTaskStatusArray[x].usStackHighWaterMark;
+                    }
+                    my_itoa(xTaskHistoryArray[i].usLowestStack, temp);
+                    padString(buffer + 54, temp, 14);
+                    break;
+                }
+            }
+            #endif
+
+            // Format the task number
+            #if WATERMARK_MIN == 1
+            my_itoa(pxTaskStatusArray[x].xTaskNumber, temp);
+            padString(buffer + 68, temp, 16);
+            #else
+            my_itoa(pxTaskStatusArray[x].xTaskNumber, temp);
+            padString(buffer + 54, temp, 12);
+            #endif
+
+            // Format the task CPU time
+            #if WATERMARK_MIN == 1
+            my_itoa(pxTaskStatusArray[x].ulRunTimeCounter, temp);
+            padString(buffer + 84, temp, 17);
+            #else
+            my_itoa(pxTaskStatusArray[x].ulRunTimeCounter, temp);
+            padString(buffer + 66, temp, 15);
+            #endif
+
+            // End the string with "\r\n"
+            buffer[101] = '\r';
+            buffer[102] = '\n';
+            buffer[103] = '\0';
+
+            // Send the formatted line via UART
+            UARTSendString(buffer);
+        }
+
+        // Send the total run time
+        UARTSendString("Total Run Time: ");
+        my_itoa(ulTotalRunTime, temp);
+        UARTSendString(temp);
+        UARTSendString(" ms\r\n");
+
+        // Get and send the free heap size
+        xFreeHeapSize = xPortGetFreeHeapSize();
+        UARTSendString("Free heap: ");
+        my_itoa(xFreeHeapSize, temp);
+        UARTSendString(temp);
+        UARTSendString(" bytes\r\n");
+
+        // Wait before the next update
+        vTaskDelay(mainTOP_TASK_DELAY);
+    }
+}
+
+static void vTemperatureSensorTask(void *pvParameters)
+{
+    const TickType_t xFrequency = pdMS_TO_TICKS(100); // 10Hz frequency
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+
+    for(;;)
+    {
+        int temperature = simple_rand() % 100;  // Simulate temperature between 0 and 99 degrees
+        xQueueSend(xTemperatureQueue, &temperature, portMAX_DELAY);
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
+    }
+}
 
 void vUART_ISR(void)
 {
-unsigned long ulStatus;
+    uint32_t ulStatus;
+    char c;
+    int newN;
 
-	/* What caused the interrupt. */
-	ulStatus = UARTIntStatus( UART0_BASE, pdTRUE );
+    /* Get the interrupt status. */
+    ulStatus = UARTIntStatus(UART0_BASE, true);
 
-	/* Clear the interrupt. */
-	UARTIntClear( UART0_BASE, ulStatus );
+    /* Clear the asserted interrupts. */
+    UARTIntClear(UART0_BASE, ulStatus);
 
-	/* Was a Tx interrupt pending? */
-	if( ulStatus & UART_INT_TX )
-	{
-		/* Send the next character in the string.  We are not using the FIFO. */
-		if( *pcNextChar != 0 )
-		{
-			if( !( HWREG( UART0_BASE + UART_O_FR ) & UART_FR_TXFF ) )
-			{
-				HWREG( UART0_BASE + UART_O_DR ) = *pcNextChar;
-			}
-			pcNextChar++;
-		}
-	}
+    /* Check if it's a receive interrupt. */
+    if (ulStatus & (UART_INT_RX | UART_INT_RT))
+    {
+        /* Get the character from UART. */
+        c = UARTCharGet(UART0_BASE);
+
+        /* Check if the character is a valid number between '1' and '9'. */
+        if (c >= '1' && c <= '9')
+        {
+            newN = c - '0'; // Convert ASCII to integer
+
+            /* Send the new value of N to the filter task via the queue. */
+            xQueueSendFromISR(xNQueue, &newN, NULL);
+
+            /* Optional: Echo the received character back to UART. */
+            UARTCharPut(UART0_BASE, c);
+
+            /* Exit the ISR to free the UART. */
+            return;
+        }
+        else
+        {
+            /* Optional: Echo an error message or ignore the character. */
+            UARTCharPut(UART0_BASE, 'E'); // Echo 'E' for error
+        }
+    }
 }
-/*-----------------------------------------------------------*/
-
-void vGPIO_ISR( void )
+static void vFilterTask(void *pvParameters)
 {
-portBASE_TYPE xHigherPriorityTaskWoken = pdFALSE;
+    int N = 3; // Initial value of N
+    int *buffer = pvPortMalloc(N * sizeof(int)); // Dynamically allocate the buffer based on N
+    int index = 0;
+    int sum = 0;
+    int count = 0;
 
-	/* Clear the interrupt. */
-	GPIOPinIntClear(GPIO_PORTC_BASE, mainPUSH_BUTTON);
+    for (;;)
+    {
+        /* Check if a new value for N has been received */
+        int receivedN;
+        if (xQueueReceive(xNQueue, &receivedN, 0) == pdPASS)
+        {
+            /* Adjust the buffer size based on the new value of N */
+            N = receivedN;
+            vPortFree(buffer);
+            buffer = pvPortMalloc(N * sizeof(int));
+            index = 0;
+            sum = 0;
+            count = 0;
+        }
 
-	/* Wake the button handler task. */
-	xSemaphoreGiveFromISR( xButtonSemaphore, &xHigherPriorityTaskWoken );
+        int temperature;
+        if (xQueueReceive(xTemperatureQueue, &temperature, portMAX_DELAY) == pdPASS)
+        {
+            sum -= buffer[index];
+            buffer[index] = temperature;
+            sum += temperature;
+            index = (index + 1) % N;
+            if (count < N) count++;
 
-	portEND_SWITCHING_ISR( xHigherPriorityTaskWoken );
+            int filteredValue = sum / count;
+            xQueueSend(xFilteredQueue, &filteredValue, portMAX_DELAY);
+        }
+    }
 }
-/*-----------------------------------------------------------*/
 
-static void vPrintTask( void *pvParameters )
+static void vGraphTask(void *pvParameters)
 {
-char *pcMessage;
-unsigned portBASE_TYPE uxLine = 0, uxRow = 0;
+    int filteredValue;
+    unsigned char graph[2 * MAX_WIDTH] = {0}; // Buffer to store the graph on the two lines of the screen
 
-	for( ;; )
-	{
-		/* Wait for a message to arrive. */
-		xQueueReceive( xPrintQueue, &pcMessage, portMAX_DELAY );
+    // Initialize the LCD screen
+    OSRAMInit(false);
+    OSRAMClear();
 
-		/* Write the message to the LCD. */
-		uxRow++;
-		uxLine++;
-		OSRAMClear();
-		OSRAMStringDraw( pcMessage, uxLine & 0x3f, uxRow & 0x01);
-	}
+    for (;;)
+    {
+        /* Wait for a filtered value to arrive. */
+        xQueueReceive(xFilteredQueue, &filteredValue, portMAX_DELAY);
+    
+        /* Scale the filtered value to the height of the graph. */
+        int scaledValue = (filteredValue * (MAX_HEIGHT)) / 99;
+        /* Write the filtered value to the LCD screen. */
+        
+        /* Call the intToGraph function to update the graph buffer. */
+        intToGraph(graph, scaledValue);
+        // Clear the LCD screen before drawing the graph
+        OSRAMClear();
+        /* Draw the graph on the LCD screen. */
+        OSRAMImageDraw(graph, 0, 0, MAX_WIDTH, 2);
+    }
 }
 
+void configureTimerForRunTimeStats(void)
+{
+    // Enable the timer peripheral
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER0);
+    TimerConfigure(TIMER0_BASE, TIMER_CFG_32_BIT_TIMER);
+
+    // Configure the timer to generate interrupts every 1 ms
+    uint32_t ui32Period = (SysCtlClockGet()/1000);
+    TimerLoadSet(TIMER0_BASE, TIMER_A, ui32Period - 1);
+
+    // Register the interrupt handler
+    TimerIntRegister(TIMER0_BASE, TIMER_A, Timer0IntHandler);
+    IntEnable(INT_TIMER0A);
+    TimerIntEnable(TIMER0_BASE, TIMER_TIMA_TIMEOUT);
+
+    // Enable the timer
+    TimerEnable(TIMER0_BASE, TIMER_A);
+}
+
+void Timer0IntHandler(void)
+{
+    // Clear the timer interrupt
+    TimerIntClear(TIMER0_BASE, TIMER_TIMA_TIMEOUT);
+
+    // Increment the runtime counter
+    ulHighFrequencyTimerTicks++;
+}
+
+uint32_t getRunTimeCounterValue(void)
+{
+    // Return the current runtime counter value
+    return ulHighFrequencyTimerTicks;
+}
