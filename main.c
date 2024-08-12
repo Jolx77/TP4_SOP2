@@ -25,10 +25,10 @@ int main(int argc, char *argv[])
     static StaticTask_t xTopTaskTCB;
 
     /* Start the tasks. */
-    xTaskCreate(vTemperatureSensorTask, "Temps", (configMINIMAL_STACK_SIZE)-52, NULL, mainTEMP_TASK_PRIORITY, NULL);
-    xTaskCreate(vFilterTask, "Filter", (configMINIMAL_STACK_SIZE)-48, NULL, mainFILTER_TASK_PRIORITY, NULL);
+    xTaskCreate(vTemperatureSensorTask, "Temps", (configMINIMAL_STACK_SIZE)-48, NULL, mainTEMP_TASK_PRIORITY, NULL);
+    xTaskCreate(vFilterTask, "Filter", (configMINIMAL_STACK_SIZE)-42, NULL, mainFILTER_TASK_PRIORITY, NULL);
     xTaskCreate(vGraphTask, "Graph", (configMINIMAL_STACK_SIZE)-2, NULL, mainGRAPH_TASK_PRIORITY, NULL);
-    xTaskCreate(vTopTask, "Top", (configMINIMAL_STACK_SIZE*2)-58, NULL, mainTOP_TASK_PRIORITY, NULL);   
+    xTaskCreate(vTopTask, "Top", (configMINIMAL_STACK_SIZE*2)-56, NULL, mainTOP_TASK_PRIORITY, NULL);   
 
     /* Start the scheduler. */
     vTaskStartScheduler();
@@ -115,25 +115,30 @@ void my_itoa(int num, char *str) {
     }
 }
 
-void intToGraph(unsigned char graph[2*MAX_WIDTH],int value)
+void intToGraph(unsigned char graph[2*MAX_WIDTH], int value)
 {
-	for(int i = MAX_WIDTH - 1; i > 0;i--)
-	{
-		graph[i] = graph[i-1];
-		graph[i + MAX_WIDTH] = graph[i + MAX_WIDTH - 1];
-	}
+    // Shift the graph buffer to the right to make space for the new value
+    for(int i = MAX_WIDTH - 1; i > 0; i--)
+    {
+        graph[i] = graph[i - 1]; // Shift the upper part of the graph
+        graph[i + MAX_WIDTH] = graph[i + MAX_WIDTH - 1]; // Shift the lower part of the graph
+    }
 
-	graph[MAX_WIDTH] = 0;
-	graph[0] = 0;
+    // Clear the first column of the graph
+    graph[MAX_WIDTH] = 0; // Clear the upper part
+    graph[0] = 0; // Clear the lower part
 
-	if(value < 8)
-	{
-		graph[MAX_WIDTH] = (1 << (7 - value));
-	}
-	else
-	{
-		graph[0] = (1 << (15 - value));
-	}
+    // Update the graph with the new value
+    if(value < 8)
+    {
+        // If the value is less than 8, update the upper part of the graph
+        graph[MAX_WIDTH] = (1 << (7 - value));
+    }
+    else
+    {
+        // If the value is 8 or greater, update the lower part of the graph
+        graph[0] = (1 << (15 - value));
+    }
 }
 
 void padString(char *dest, const char *src, int width)
@@ -214,16 +219,17 @@ static void vTopTask(void *pvParameters)
     char buffer[128];
     char temp[32];
     UBaseType_t uxArraySize, x;
-    TaskStatus_t pxTaskStatusArray[configMAX_PRIORITIES]; // Asignar tamaño máximo posible
+    TaskStatus_t pxTaskStatusArray[configMAX_PRIORITIES]; 
     uint32_t ulTotalRunTime;
     size_t xFreeHeapSize;
+    TickType_t xLastWakeTime;
 
     #if WATERMARK_MIN == 1
     TaskHistory_t xTaskHistoryArray[configMAX_PRIORITIES];
     #endif
 
-    // Obtener el número máximo de tareas una vez
     uxArraySize = uxTaskGetNumberOfTasks();
+    xLastWakeTime = xTaskGetTickCount();
 
     for (;;)
     {
@@ -298,9 +304,15 @@ static void vTopTask(void *pvParameters)
             #endif
 
             // End the string with "\r\n"
+            #if WATERMARK_MIN == 1
             buffer[101] = '\r';
             buffer[102] = '\n';
             buffer[103] = '\0';
+            #else
+            buffer[81] = '\r';
+            buffer[82] = '\n';
+            buffer[83] = '\0';
+            #endif
 
             // Send the formatted line via UART
             UARTSendString(buffer);
@@ -320,7 +332,7 @@ static void vTopTask(void *pvParameters)
         UARTSendString(" bytes\r\n");
 
         // Wait before the next update
-        vTaskDelay(mainTOP_TASK_DELAY);
+        vTaskDelayUntil(&xLastWakeTime, mainTOP_TASK_DELAY);
     }
 }
 
@@ -363,7 +375,6 @@ void vUART_ISR(void)
             /* Send the new value of N to the filter task via the queue. */
             xQueueSendFromISR(xNQueue, &newN, NULL);
 
-            /* Optional: Echo the received character back to UART. */
             UARTCharPut(UART0_BASE, c);
 
             /* Exit the ISR to free the UART. */
@@ -371,44 +382,44 @@ void vUART_ISR(void)
         }
         else
         {
-            /* Optional: Echo an error message or ignore the character. */
             UARTCharPut(UART0_BASE, 'E'); // Echo 'E' for error
         }
     }
 }
+
 static void vFilterTask(void *pvParameters)
 {
     int N = 3; // Initial value of N
-    int *buffer = pvPortMalloc(N * sizeof(int)); // Dynamically allocate the buffer based on N
-    int index = 0;
+    int buffer[MAX_N] = {0}; // Static buffer of fixed size
     int sum = 0;
-    int count = 0;
+    int receivedN = 3;
+    int temperature = 0;
+    int count = 0; // Variable that allows calculating the average even when the number of samples is less than N.
 
     for (;;)
     {
         /* Check if a new value for N has been received */
-        int receivedN;
         if (xQueueReceive(xNQueue, &receivedN, 0) == pdPASS)
         {
-            /* Adjust the buffer size based on the new value of N */
+            /* Adjust the value of N */
             N = receivedN;
-            vPortFree(buffer);
-            buffer = pvPortMalloc(N * sizeof(int));
-            index = 0;
-            sum = 0;
-            count = 0;
         }
 
-        int temperature;
         if (xQueueReceive(xTemperatureQueue, &temperature, portMAX_DELAY) == pdPASS)
         {
-            sum -= buffer[index];
-            buffer[index] = temperature;
-            sum += temperature;
-            index = (index + 1) % N;
-            if (count < N) count++;
-
-            int filteredValue = sum / count;
+            for (int i = MAX_N - 1; i > 0; i--)
+            {
+                buffer[i] = buffer[i - 1];
+            }
+            buffer[0] = temperature;
+            if (count < MAX_N) count++;
+            sum = 0; // Reset sum before adding the values from the buffer
+            int valuesToAverage = (count < N) ? count : N;
+            for (int i = 0; i < valuesToAverage; i++)
+            {
+                sum += buffer[i];
+            }
+            int filteredValue = sum / valuesToAverage;
             xQueueSend(xFilteredQueue, &filteredValue, portMAX_DELAY);
         }
     }
@@ -429,12 +440,10 @@ static void vGraphTask(void *pvParameters)
         xQueueReceive(xFilteredQueue, &filteredValue, portMAX_DELAY);
     
         /* Scale the filtered value to the height of the graph. */
-        int scaledValue = (filteredValue * (MAX_HEIGHT)) / 99;
-        /* Write the filtered value to the LCD screen. */
-        
+        int scaledValue = (filteredValue * (MAX_HEIGHT)) / 99;        
         /* Call the intToGraph function to update the graph buffer. */
         intToGraph(graph, scaledValue);
-        // Clear the LCD screen before drawing the graph
+        /* Clear the LCD screen before drawing the graph */
         OSRAMClear();
         /* Draw the graph on the LCD screen. */
         OSRAMImageDraw(graph, 0, 0, MAX_WIDTH, 2);
