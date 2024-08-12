@@ -1,0 +1,12 @@
+{
+    "files.associations": {
+        "compare": "c",
+        "cstdint": "c",
+        "driverlib.h": "c",
+        "hw_timer.h": "c",
+        "osram96x16.h": "c",
+        "cstdlib": "c",
+        "cstring": "c",
+        "algorithm": "c"
+    }
+}
