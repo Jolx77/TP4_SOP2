@@ -24,12 +24,11 @@
 #define mainBAUD_RATE                ( 19200 )
 #define MAX_HEIGHT 16  // Maximum graph height in pixels
 #define MAX_WIDTH 96   // Maximum graph width in pixels
-#define WATERMARK_MIN 1 // Shows the lowest historical free stack space value
+#define WATERMARK_MIN 1 // Shows the lowest historical free stack space value on the top function
 #define MAX_N 9 // Max number of N
 #define MIN_N 1 // Min number of N
  
 /* Task priorities. */
-#define mainCHECK_TASK_PRIORITY      ( tskIDLE_PRIORITY + 5 )
 #define mainGRAPH_TASK_PRIORITY      ( tskIDLE_PRIORITY + 2 )
 #define mainTEMP_TASK_PRIORITY       ( tskIDLE_PRIORITY + 4 )
 #define mainFILTER_TASK_PRIORITY     ( tskIDLE_PRIORITY + 3 )
@@ -135,20 +134,6 @@ void my_itoa(int num, char *str);
  * @return size_t Length of the string.
  */
 size_t my_strlen(const char *str);
-
-/**
- * @brief Formats a string with various task information.
- * 
- * @param buffer Buffer to store the formatted string.
- * @param size Size of the buffer.
- * @param format Format string.
- * @param taskName Name of the task.
- * @param state State of the task.
- * @param priority Priority of the task.
- * @param stack Stack size of the task.
- * @param taskNumber Task number.
- */
-void my_snprintf(char *buffer, size_t size, const char *format, const char *taskName, char state, unsigned int priority, unsigned int stack, unsigned int taskNumber);
 
 /**
  * @brief Copies characters from the source string to the destination string, padding the remaining space with spaces until the specified width is reached.
