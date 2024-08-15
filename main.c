@@ -125,18 +125,18 @@ void intToGraph(unsigned char graph[2*MAX_WIDTH], int value)
     }
 
     // Clear the first column of the graph
-    graph[MAX_WIDTH] = 0; // Clear the upper part
-    graph[0] = 0; // Clear the lower part
+    graph[MAX_WIDTH] = 0; // Clear the lower part
+    graph[0] = 0; // Clear the upper part
 
     // Update the graph with the new value
     if(value < 8)
     {
-        // If the value is less than 8, update the upper part of the graph
+        // If the value is less than 8, update the lower part of the graph
         graph[MAX_WIDTH] = (1 << (7 - value));
     }
     else
     {
-        // If the value is 8 or greater, update the lower part of the graph
+        // If the value is 8 or greater, update the upper part of the graph
         graph[0] = (1 << (15 - value));
     }
 }
@@ -216,16 +216,16 @@ const char* getTaskStateString(eTaskState state)
 
 static void vTopTask(void *pvParameters)
 {
-    char buffer[128];
-    char temp[32];
-    UBaseType_t uxArraySize, x;
-    TaskStatus_t pxTaskStatusArray[configMAX_PRIORITIES]; 
-    uint32_t ulTotalRunTime;
-    size_t xFreeHeapSize;
-    TickType_t xLastWakeTime;
+    char buffer[128] = {0};
+    char temp[32] = {0};
+    UBaseType_t uxArraySize = 0, x = 0;
+    TaskStatus_t pxTaskStatusArray[configMAX_PRIORITIES] = {0}; 
+    uint32_t ulTotalRunTime = 0;
+    size_t xFreeHeapSize = 0;
+    TickType_t xLastWakeTime = 0;
 
     #if WATERMARK_MIN == 1
-    TaskHistory_t xTaskHistoryArray[configMAX_PRIORITIES];
+    TaskHistory_t xTaskHistoryArray[configMAX_PRIORITIES] = {0};
     #endif
 
     uxArraySize = uxTaskGetNumberOfTasks();
