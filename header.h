@@ -24,7 +24,7 @@
 #define mainBAUD_RATE                ( 19200 )
 #define MAX_HEIGHT 16  // Maximum graph height in pixels
 #define MAX_WIDTH 96   // Maximum graph width in pixels
-#define WATERMARK_MIN 1 // Shows the lowest historical free stack space value on the top function
+#define WATERMARK_MIN 0 // Shows the lowest historical free stack space value on the top function
 #define MAX_N 9 // Max number of N
 #define MIN_N 1 // Min number of N
  

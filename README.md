@@ -199,16 +199,15 @@ static void vTopTask(void *pvParameters)
     char buffer[128];
     char temp[32];
     UBaseType_t uxArraySize, x;
-    TaskStatus_t pxTaskStatusArray[configMAX_PRIORITIES]; 
+    uxArraySize = uxTaskGetNumberOfTasks();
+    TaskStatus_t pxTaskStatusArray[uxArraySize]; 
     uint32_t ulTotalRunTime;
     size_t xFreeHeapSize;
     TickType_t xLastWakeTime;
 
     #if WATERMARK_MIN == 1
-    TaskHistory_t xTaskHistoryArray[configMAX_PRIORITIES];
+    TaskHistory_t xTaskHistoryArray[uxArraySize];
     #endif
-
-    uxArraySize = uxTaskGetNumberOfTasks();
     xLastWakeTime = xTaskGetTickCount();
 
     for (;;)

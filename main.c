@@ -20,15 +20,11 @@ int main(int argc, char *argv[])
     unsigned int seed = 91218; // Initialize the seed with an arbitrary value
     xQueueSend(xSeedQueue, &seed, portMAX_DELAY);
 
-    /* Define buffers for the static task. */
-    static StackType_t xTopTaskStack[configMINIMAL_STACK_SIZE * 2];
-    static StaticTask_t xTopTaskTCB;
-
     /* Start the tasks. */
     xTaskCreate(vTemperatureSensorTask, "Temps", (configMINIMAL_STACK_SIZE)-48, NULL, mainTEMP_TASK_PRIORITY, NULL);
     xTaskCreate(vFilterTask, "Filter", (configMINIMAL_STACK_SIZE)-42, NULL, mainFILTER_TASK_PRIORITY, NULL);
     xTaskCreate(vGraphTask, "Graph", (configMINIMAL_STACK_SIZE)-2, NULL, mainGRAPH_TASK_PRIORITY, NULL);
-    xTaskCreate(vTopTask, "Top", (configMINIMAL_STACK_SIZE*2)-56, NULL, mainTOP_TASK_PRIORITY, NULL);   
+    xTaskCreate(vTopTask, "Top", (configMINIMAL_STACK_SIZE*2)-54, NULL, mainTOP_TASK_PRIORITY, NULL);   
 
     /* Start the scheduler. */
     vTaskStartScheduler();
@@ -125,18 +121,18 @@ void intToGraph(unsigned char graph[2*MAX_WIDTH], int value)
     }
 
     // Clear the first column of the graph
-    graph[MAX_WIDTH] = 0; // Clear the lower part
-    graph[0] = 0; // Clear the upper part
+    graph[MAX_WIDTH] = 0; // Clear the upper part
+    graph[0] = 0; // Clear the lower part
 
     // Update the graph with the new value
     if(value < 8)
     {
-        // If the value is less than 8, update the lower part of the graph
+        // If the value is less than 8, update the upper part of the graph
         graph[MAX_WIDTH] = (1 << (7 - value));
     }
     else
     {
-        // If the value is 8 or greater, update the upper part of the graph
+        // If the value is 8 or greater, update the lower part of the graph
         graph[0] = (1 << (15 - value));
     }
 }
@@ -216,26 +212,25 @@ const char* getTaskStateString(eTaskState state)
 
 static void vTopTask(void *pvParameters)
 {
-    char buffer[128] = {0};
-    char temp[32] = {0};
-    UBaseType_t uxArraySize = 0, x = 0;
-    TaskStatus_t pxTaskStatusArray[configMAX_PRIORITIES] = {0}; 
-    uint32_t ulTotalRunTime = 0;
-    size_t xFreeHeapSize = 0;
-    TickType_t xLastWakeTime = 0;
+    char buffer[128];
+    char temp[32];
+    UBaseType_t uxArraySize, x;
+    uxArraySize = uxTaskGetNumberOfTasks();
+    TaskStatus_t pxTaskStatusArray[uxArraySize]; 
+    uint32_t ulTotalRunTime;
+    size_t xFreeHeapSize;
+    TickType_t xLastWakeTime;
 
     #if WATERMARK_MIN == 1
-    TaskHistory_t xTaskHistoryArray[configMAX_PRIORITIES] = {0};
+    TaskHistory_t xTaskHistoryArray[uxArraySize];
     #endif
-
-    uxArraySize = uxTaskGetNumberOfTasks();
     xLastWakeTime = xTaskGetTickCount();
 
     for (;;)
     {
         // Initialize the task history array if WATERMARK_MIN is defined as 1
         #if WATERMARK_MIN == 1
-        for (x = 0; x < configMAX_PRIORITIES; x++) {
+        for (x = 0; x < uxArraySize; x++) {
             xTaskHistoryArray[x].xTaskHandle = NULL;
             xTaskHistoryArray[x].usLowestStack = 0xFFFF; // Initial high value
         }
@@ -270,7 +265,7 @@ static void vTopTask(void *pvParameters)
 
             // Update and format the lowest historical stack value if WATERMARK_MIN is defined as 1
             #if WATERMARK_MIN == 1
-            for (int i = 0; i < configMAX_PRIORITIES; i++) {
+            for (int i = 0; i < uxArraySize; i++) {
                 if (xTaskHistoryArray[i].xTaskHandle == pxTaskStatusArray[x].xHandle || xTaskHistoryArray[i].xTaskHandle == NULL) {
                     if (xTaskHistoryArray[i].xTaskHandle == NULL) {
                         xTaskHistoryArray[i].xTaskHandle = pxTaskStatusArray[x].xHandle;
